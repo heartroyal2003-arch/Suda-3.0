@@ -2,38 +2,90 @@ package com.example.suda
 
 import android.Manifest
 import android.app.Activity
-import android.bluetooth.BluetoothAdapter
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.media.MediaRecorder
 import android.os.Bundle
+import android.os.Environment
+import android.os.Build
+import android.provider.Settings
+import android.view.Gravity
+import android.view.View
 import android.widget.Button
-import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.google.android.gms.nearby.Nearby
-import com.google.android.gms.nearby.connection.*
+import com.google.android.gms.nearby.connection.AdvertisingOptions
+import com.google.android.gms.nearby.connection.ConnectionInfo
+import com.google.android.gms.nearby.connection.ConnectionLifecycleCallback
+import com.google.android.gms.nearby.connection.ConnectionResolution
+import com.google.android.gms.nearby.connection.DiscoveryOptions
+import com.google.android.gms.nearby.connection.EndpointDiscoveryCallback
 import com.google.android.gms.nearby.connection.Payload
+import com.google.android.gms.nearby.connection.PayloadCallback
+import com.google.android.gms.nearby.connection.Strategy
+import com.google.android.gms.nearby.connection.ConnectionsClient
 import java.io.File
 
-class MainActivity : Activity() {
+class MainActivity : AppCompatActivity() {
 
-    private val serviceId = "com.example.suda"
-    private val strategy = Strategy.P2P_CLUSTER
+    companion object {
+        private const val REQUEST_PERMISSIONS = 100
+        private const val REQUEST_BLUETOOTH = 101
 
-    private val connectedDevices = mutableMapOf<String, String>()
+        private const val SERVICE_ID = "com.example.suda"
+        private const val DEVICE_NAME = "Suda"
 
-    private var recorder: MediaRecorder? = null
+        private val STRATEGY = Strategy.P2P_CLUSTER
+    }
+
+    private lateinit var connectionsClient: ConnectionsClient
+
+    private lateinit var statusText: TextView
+    private lateinit var deviceCountText: TextView
+
+    private val connectedDevices = mutableSetOf<String>()
+
+    private var mediaRecorder: MediaRecorder? = null
     private var recordingFile: File? = null
     private var isRecording = false
 
-    private lateinit var statusText: TextView
-    private lateinit var messageInput: EditText
+    private val payloadCallback = object : PayloadCallback() {
+
+        override fun onPayloadReceived(
+            endpointId: String,
+            payload: Payload
+        ) {
+            if (payload.type == Payload.Type.BYTES) {
+
+                val bytes = payload.asBytes() ?: return
+                val message = String(bytes, Charsets.UTF_8)
+
+                runOnUiThread {
+                    playMessageSound()
+
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Message: $message",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+
+        override fun onPayloadTransferUpdate(
+            endpointId: String,
+            update: PayloadTransferUpdate
+        ) {
+            // File transfer progress can be added here later.
+        }
+    }
 
     private val connectionLifecycleCallback =
         object : ConnectionLifecycleCallback() {
@@ -42,292 +94,369 @@ class MainActivity : Activity() {
                 endpointId: String,
                 connectionInfo: ConnectionInfo
             ) {
-                Nearby.getConnectionsClient(this@MainActivity)
-                    .acceptConnection(endpointId, payloadCallback)
-                    .addOnSuccessListener {
-                        statusText.text = "Connecting: ${connectionInfo.endpointName}"
-                    }
+                connectionsClient.acceptConnection(
+                    endpointId,
+                    payloadCallback
+                )
             }
 
             override fun onConnectionResult(
                 endpointId: String,
                 result: ConnectionResolution
             ) {
-                if (result.status.isSuccess) {
-                    connectedDevices[endpointId] = endpointId
+                if (result.status.statusCode ==
+                    com.google.android.gms.common.api.Status.RESULT_SUCCESS
+                ) {
 
-                    statusText.text =
-                        "Connected devices: ${connectedDevices.size}"
-
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Suda device connected",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                } else {
-                    connectedDevices.remove(endpointId)
-
-                    statusText.text =
-                        "Connected devices: ${connectedDevices.size}"
-                }
-            }
-
-            override fun onDisconnected(endpointId: String) {
-                connectedDevices.remove(endpointId)
-
-                statusText.text =
-                    "Connected devices: ${connectedDevices.size}"
-            }
-        }
-
-    private val payloadCallback =
-        object : PayloadCallback() {
-
-            override fun onPayloadReceived(
-                endpointId: String,
-                payload: Payload
-            ) {
-                if (payload.type == Payload.Type.BYTES) {
-
-                    val data = payload.asBytes()
-                    val message =
-                        data?.toString(Charsets.UTF_8) ?: return
-
-                    playMessageSound()
+                    connectedDevices.add(endpointId)
 
                     runOnUiThread {
-                        Toast.makeText(
-                            this@MainActivity,
-                            "Message: $message",
-                            Toast.LENGTH_LONG
-                        ).show()
+                        updateDeviceCount()
+                        statusText.text = "Suda connected"
+                    }
+
+                } else {
+
+                    connectedDevices.remove(endpointId)
+
+                    runOnUiThread {
+                        updateDeviceCount()
+                        statusText.text = "Connection failed"
                     }
                 }
             }
 
-            override fun onPayloadTransferUpdate(
+            override fun onDisconnected(endpointId: String) {
+
+                connectedDevices.remove(endpointId)
+
+                runOnUiThread {
+                    updateDeviceCount()
+                }
+            }
+        }
+
+    private val endpointDiscoveryCallback =
+        object : EndpointDiscoveryCallback() {
+
+            override fun onEndpointFound(
                 endpointId: String,
-                update: PayloadTransferUpdate
+                info: com.google.android.gms.nearby.connection.DiscoveredEndpointInfo
             ) {
-                // File/voice transfer progress can be handled here.
+
+                connectionsClient.requestConnection(
+                    DEVICE_NAME,
+                    endpointId,
+                    connectionLifecycleCallback
+                )
+                    .addOnSuccessListener {
+                        runOnUiThread {
+                            statusText.text = "Connecting..."
+                        }
+                    }
+                    .addOnFailureListener {
+                        runOnUiThread {
+                            statusText.text = "Connection request failed"
+                        }
+                    }
+            }
+
+            override fun onEndpointLost(endpointId: String) {
+                // Device is no longer discoverable.
             }
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        connectionsClient = Nearby.getConnectionsClient(this)
+
         createInterface()
-        requestSudaPermissions()
+        requestRequiredPermissions()
     }
 
     private fun createInterface() {
 
         val root = LinearLayout(this)
-        root.orientation = LinearLayout.VERTICAL
-        root.setPadding(32, 40, 32, 32)
 
-        val title = TextView(this)
-        title.text = "Suda"
-        title.textSize = 30f
+        root.orientation = LinearLayout.VERTICAL
+        root.gravity = Gravity.CENTER
+        root.setPadding(40, 40, 40, 40)
 
         statusText = TextView(this)
+
         statusText.text = "Suda ready"
-        statusText.textSize = 18f
+        statusText.textSize = 22f
+        statusText.gravity = Gravity.CENTER
+
+        deviceCountText = TextView(this)
+
+        deviceCountText.text = "Connected devices: 0"
+        deviceCountText.textSize = 18f
+        deviceCountText.gravity = Gravity.CENTER
 
         val connectButton = Button(this)
-        connectButton.text = "Find / Connect Suda Devices"
-        connectButton.setOnClickListener {
-            startSudaConnection()
-        }
 
-        messageInput = EditText(this)
-        messageInput.hint = "Type message"
+        connectButton.text = "Find / Connect Suda Devices"
+
+        connectButton.setOnClickListener {
+            checkBluetoothAndStart()
+        }
 
         val sendButton = Button(this)
-        sendButton.text = "Send Message"
+
+        sendButton.text = "Send Test Message"
+
         sendButton.setOnClickListener {
-            sendMessage()
+            sendTestMessage()
         }
 
-        val voiceButton = Button(this)
-        voiceButton.text = "Record Voice"
-        voiceButton.setOnClickListener {
-            toggleRecording(voiceButton)
+        val recordButton = Button(this)
+
+        recordButton.text = "Record Voice"
+
+        recordButton.setOnClickListener {
+            if (isRecording) {
+                stopRecording()
+            } else {
+                startRecording()
+            }
         }
 
         val soundButton = Button(this)
+
         soundButton.text = "Test Message Sound"
+
         soundButton.setOnClickListener {
             playMessageSound()
         }
 
-        root.addView(title)
-        root.addView(statusText)
+        root.addView(
+            statusText,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        root.addView(
+            deviceCountText,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+
         root.addView(connectButton)
-        root.addView(messageInput)
         root.addView(sendButton)
-        root.addView(voiceButton)
+        root.addView(recordButton)
         root.addView(soundButton)
 
         setContentView(root)
     }
 
-    private fun requestSudaPermissions() {
+    private fun requestRequiredPermissions() {
 
         val permissions = mutableListOf<String>()
 
-        if (android.os.Build.VERSION.SDK_INT >= 31) {
-            permissions.add(Manifest.permission.BLUETOOTH_SCAN)
-            permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
-            permissions.add(Manifest.permission.BLUETOOTH_ADVERTISE)
-        } else {
-            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+
+            permissions.add(
+                Manifest.permission.BLUETOOTH_SCAN
+            )
+
+            permissions.add(
+                Manifest.permission.BLUETOOTH_CONNECT
+            )
+
+            permissions.add(
+                Manifest.permission.BLUETOOTH_ADVERTISE
+            )
         }
 
-        permissions.add(Manifest.permission.RECORD_AUDIO)
+        permissions.add(
+            Manifest.permission.RECORD_AUDIO
+        )
 
-        val needed = permissions.filter {
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.R) {
+
+            permissions.add(
+                Manifest.permission.ACCESS_FINE_LOCATION
+            )
+        }
+
+        val required = permissions.filter {
             ContextCompat.checkSelfPermission(
                 this,
                 it
             ) != PackageManager.PERMISSION_GRANTED
         }
 
-        if (needed.isNotEmpty()) {
+        if (required.isNotEmpty()) {
+
             ActivityCompat.requestPermissions(
                 this,
-                needed.toTypedArray(),
-                1001
+                required.toTypedArray(),
+                REQUEST_PERMISSIONS
             )
         }
     }
 
-    private fun startSudaConnection() {
+    private fun checkBluetoothAndStart() {
 
-        if (!hasRequiredPermissions()) {
-            requestSudaPermissions()
-            return
-        }
+        try {
 
-        val client = Nearby.getConnectionsClient(this)
+            val bluetoothAdapter =
+                android.bluetooth.BluetoothAdapter.getDefaultAdapter()
 
-        val advertisingOptions =
-            AdvertisingOptions.Builder(strategy).build()
+            if (bluetoothAdapter != null &&
+                !bluetoothAdapter.isEnabled
+            ) {
 
-        client.startAdvertising(
-            "Suda",
-            serviceId,
-            connectionLifecycleCallback,
-            advertisingOptions
-        ).addOnSuccessListener {
-
-            statusText.text =
-                "Suda is discoverable"
-
-        }.addOnFailureListener { error ->
-
-            statusText.text =
-                "Advertising error: ${error.message}"
-        }
-
-        val discoveryOptions =
-            DiscoveryOptions.Builder(strategy).build()
-
-        client.startDiscovery(
-            serviceId,
-            object : EndpointDiscoveryCallback() {
-
-                override fun onEndpointFound(
-                    endpointId: String,
-                    info: DiscoveredEndpointInfo
-                ) {
-
-                    client.requestConnection(
-                        "Suda",
-                        endpointId,
-                        connectionLifecycleCallback
+                val intent =
+                    Intent(
+                        android.bluetooth.BluetoothAdapter.ACTION_REQUEST_ENABLE
                     )
-                }
 
-                override fun onEndpointLost(endpointId: String) {
-                    // Device disappeared.
-                }
-            },
-            discoveryOptions
-        ).addOnFailureListener { error ->
+                startActivityForResult(
+                    intent,
+                    REQUEST_BLUETOOTH
+                )
 
-            statusText.text =
-                "Discovery error: ${error.message}"
+                return
+            }
+
+        } catch (e: Exception) {
+            // Continue with Nearby.
         }
 
-        enableBluetooth()
+        startNearby()
     }
 
-    private fun sendMessage() {
+    private fun startNearby() {
 
-        val text = messageInput.text.toString().trim()
+        val advertisingOptions =
+            AdvertisingOptions.Builder()
+                .setStrategy(STRATEGY)
+                .build()
 
-        if (text.isEmpty()) {
-            return
-        }
+        val discoveryOptions =
+            DiscoveryOptions.Builder()
+                .setStrategy(STRATEGY)
+                .build()
+
+        connectionsClient.startAdvertising(
+            DEVICE_NAME,
+            SERVICE_ID,
+            connectionLifecycleCallback,
+            advertisingOptions
+        )
+            .addOnSuccessListener {
+
+                runOnUiThread {
+                    statusText.text = "Advertising: Suda ready"
+                }
+            }
+            .addOnFailureListener { error ->
+
+                runOnUiThread {
+                    statusText.text =
+                        "Advertising failed: ${error.message}"
+                }
+            }
+
+        connectionsClient.startDiscovery(
+            SERVICE_ID,
+            endpointDiscoveryCallback,
+            discoveryOptions
+        )
+            .addOnSuccessListener {
+
+                runOnUiThread {
+                    statusText.text = "Searching for Suda devices..."
+                }
+            }
+            .addOnFailureListener { error ->
+
+                runOnUiThread {
+                    statusText.text =
+                        "Discovery failed: ${error.message}"
+                }
+            }
+    }
+
+    private fun sendTestMessage() {
 
         if (connectedDevices.isEmpty()) {
+
             Toast.makeText(
                 this,
                 "No Suda device connected",
                 Toast.LENGTH_SHORT
             ).show()
+
             return
         }
 
+        val message =
+            "Hello from Suda!"
+
         val payload =
-            Payload.fromBytes(text.toByteArray(Charsets.UTF_8))
+            Payload.fromBytes(
+                message.toByteArray(Charsets.UTF_8)
+            )
 
-        for (endpointId in connectedDevices.keys) {
+        for (endpointId in connectedDevices) {
 
-            Nearby.getConnectionsClient(this)
-                .sendPayload(endpointId, payload)
+            connectionsClient.sendPayload(
+                endpointId,
+                payload
+            )
+                .addOnSuccessListener {
+
+                    runOnUiThread {
+                        Toast.makeText(
+                            this,
+                            "Message sent",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+                .addOnFailureListener { error ->
+
+                    runOnUiThread {
+                        Toast.makeText(
+                            this,
+                            "Send failed: ${error.message}",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
         }
+    }
 
-        messageInput.text.clear()
+    private fun updateDeviceCount() {
 
-        Toast.makeText(
-            this,
-            "Message sent",
-            Toast.LENGTH_SHORT
-        ).show()
+        deviceCountText.text =
+            "Connected devices: ${connectedDevices.size}"
     }
 
     private fun playMessageSound() {
 
-        val audioManager =
-            getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        try {
 
-        audioManager.playSoundEffect(
-            AudioManager.FX_KEYPRESS_STANDARD,
-            0.8f
-        )
-    }
+            val audioManager =
+                getSystemService(
+                    Context.AUDIO_SERVICE
+                ) as AudioManager
 
-    private fun toggleRecording(button: Button) {
+            audioManager.playSoundEffect(
+                AudioManager.FX_KEYPRESS_STANDARD,
+                0.8f
+            )
 
-        if (isRecording) {
-
-            stopRecording()
-
-            button.text = "Record Voice"
-
-            Toast.makeText(
-                this,
-                "Voice recording saved",
-                Toast.LENGTH_SHORT
-            ).show()
-
-        } else {
-
-            startRecording()
-
-            button.text = "Stop Recording"
+        } catch (e: Exception) {
+            // Ignore sound errors.
         }
     }
 
@@ -339,19 +468,46 @@ class MainActivity : Activity() {
                 Manifest.permission.RECORD_AUDIO
             ) != PackageManager.PERMISSION_GRANTED
         ) {
-            requestSudaPermissions()
+
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(
+                    Manifest.permission.RECORD_AUDIO
+                ),
+                REQUEST_PERMISSIONS
+            )
+
             return
         }
 
         try {
 
+            val directory =
+                getExternalFilesDir(
+                    Environment.DIRECTORY_MUSIC
+                )
+
+            if (directory != null &&
+                !directory.exists()
+            ) {
+                directory.mkdirs()
+            }
+
             recordingFile =
                 File(
-                    cacheDir,
+                    directory,
                     "suda_voice_${System.currentTimeMillis()}.m4a"
                 )
 
-            recorder = MediaRecorder(this).apply {
+            mediaRecorder =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    MediaRecorder(this)
+                } else {
+                    @Suppress("DEPRECATION")
+                    MediaRecorder()
+                }
+
+            mediaRecorder?.apply {
 
                 setAudioSource(
                     MediaRecorder.AudioSource.MIC
@@ -375,10 +531,18 @@ class MainActivity : Activity() {
 
             isRecording = true
 
+            Toast.makeText(
+                this,
+                "Recording started",
+                Toast.LENGTH_SHORT
+            ).show()
+
         } catch (e: Exception) {
 
-            recorder?.release()
-            recorder = null
+            mediaRecorder?.release()
+            mediaRecorder = null
+
+            isRecording = false
 
             Toast.makeText(
                 this,
@@ -391,92 +555,43 @@ class MainActivity : Activity() {
     private fun stopRecording() {
 
         try {
-            recorder?.stop()
-        } catch (_: Exception) {
+
+            mediaRecorder?.stop()
+
+        } catch (e: Exception) {
+            // Ignore stop errors.
         }
 
-        recorder?.release()
-        recorder = null
+        mediaRecorder?.release()
+        mediaRecorder = null
+
         isRecording = false
-    }
 
-    private fun enableBluetooth() {
-
-        if (android.os.Build.VERSION.SDK_INT >= 31) {
-
-            if (
-                ContextCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.BLUETOOTH_CONNECT
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                return
-            }
-        }
-
-        val adapter =
-            BluetoothAdapter.getDefaultAdapter()
-
-        if (adapter != null && !adapter.isEnabled) {
-
-            try {
-
-                val intent =
-                    Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
-
-                startActivityForResult(intent, 2001)
-
-            } catch (_: Exception) {
-                // User can enable Bluetooth manually.
-            }
-        }
-    }
-
-    private fun hasRequiredPermissions(): Boolean {
-
-        if (android.os.Build.VERSION.SDK_INT >= 31) {
-
-            return ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.BLUETOOTH_SCAN
-            ) == PackageManager.PERMISSION_GRANTED &&
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.BLUETOOTH_CONNECT
-            ) == PackageManager.PERMISSION_GRANTED &&
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.BLUETOOTH_ADVERTISE
-            ) == PackageManager.PERMISSION_GRANTED &&
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.RECORD_AUDIO
-            ) == PackageManager.PERMISSION_GRANTED
-
-        } else {
-
-            return ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) == PackageManager.PERMISSION_GRANTED &&
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.RECORD_AUDIO
-            ) == PackageManager.PERMISSION_GRANTED
-        }
+        Toast.makeText(
+            this,
+            "Voice saved",
+            Toast.LENGTH_SHORT
+        ).show()
     }
 
     override fun onDestroy() {
 
         try {
-            recorder?.release()
-        } catch (_: Exception) {
+            connectionsClient.stopAdvertising()
+            connectionsClient.stopDiscovery()
+            connectionsClient.stopAllEndpoints()
+        } catch (e: Exception) {
+            // Ignore cleanup errors.
         }
 
-        Nearby.getConnectionsClient(this)
-            .stopAllEndpoints()
-            .addOnCompleteListener {
-                super.onDestroy()
-            }
+        try {
+            mediaRecorder?.release()
+        } catch (e: Exception) {
+            // Ignore.
+        }
+
+        mediaRecorder = null
+
+        super.onDestroy()
     }
 }
