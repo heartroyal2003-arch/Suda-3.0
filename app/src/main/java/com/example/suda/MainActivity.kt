@@ -18,19 +18,8 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import com.google.android.gms.common.api.Status
 import com.google.android.gms.nearby.Nearby
-import com.google.android.gms.nearby.connection.AdvertisingOptions
-import com.google.android.gms.nearby.connection.ConnectionInfo
-import com.google.android.gms.nearby.connection.ConnectionLifecycleCallback
-import com.google.android.gms.nearby.connection.ConnectionResolution
-import com.google.android.gms.nearby.connection.DiscoveryOptions
-import com.google.android.gms.nearby.connection.EndpointDiscoveryCallback
-import com.google.android.gms.nearby.connection.Payload
-import com.google.android.gms.nearby.connection.PayloadCallback
-import com.google.android.gms.nearby.connection.PayloadTransferUpdate
-import com.google.android.gms.nearby.connection.Strategy
-import com.google.android.gms.nearby.connection.ConnectionsClient
+import com.google.android.gms.nearby.connection.*
 import java.io.File
 
 class MainActivity : AppCompatActivity() {
@@ -47,16 +36,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var deviceCountText: TextView
 
     private val connectedDevices = mutableSetOf<String>()
+    private val strategy = Strategy.P2P_CLUSTER
+
     private var recorder: MediaRecorder? = null
     private var recordingFile: File? = null
     private var isRecording = false
 
-    private val strategy = Strategy.P2P_CLUSTER
-
     private val payloadCallback = object : PayloadCallback() {
         override fun onPayloadReceived(endpointId: String, payload: Payload) {
             if (payload.type == Payload.Type.BYTES) {
-                val message = payload.asBytes()?.toString(Charsets.UTF_8) ?: return
+                val message =
+                    payload.asBytes()?.toString(Charsets.UTF_8) ?: return
+
                 runOnUiThread {
                     playMessageSound()
                     Toast.makeText(
@@ -72,7 +63,7 @@ class MainActivity : AppCompatActivity() {
             endpointId: String,
             update: PayloadTransferUpdate
         ) {
-            // Transfer progress can be handled here.
+            // Transfer progress callback.
         }
     }
 
@@ -84,7 +75,8 @@ class MainActivity : AppCompatActivity() {
             client.acceptConnection(endpointId, payloadCallback)
                 .addOnFailureListener { error ->
                     runOnUiThread {
-                        statusText.text = "Accept failed: ${error.message}"
+                        statusText.text =
+                            "Accept failed: ${error.message}"
                     }
                 }
         }
@@ -93,7 +85,8 @@ class MainActivity : AppCompatActivity() {
             endpointId: String,
             result: ConnectionResolution
         ) {
-            if (result.status.statusCode == Status.RESULT_SUCCESS) {
+            // FIX: statusCode (Int) ko Status object se compare nahi karna.
+            if (result.status.isSuccess) {
                 connectedDevices.add(endpointId)
                 runOnUiThread {
                     updateDeviceCount()
@@ -117,18 +110,22 @@ class MainActivity : AppCompatActivity() {
     private val discoveryCallback = object : EndpointDiscoveryCallback() {
         override fun onEndpointFound(
             endpointId: String,
-            info: com.google.android.gms.nearby.connection.DiscoveredEndpointInfo
+            info: DiscoveredEndpointInfo
         ) {
-            client.requestConnection(DEVICE_NAME, endpointId, lifecycleCallback)
-                .addOnFailureListener { error ->
-                    runOnUiThread {
-                        statusText.text = "Connection request failed: ${error.message}"
-                    }
+            client.requestConnection(
+                DEVICE_NAME,
+                endpointId,
+                lifecycleCallback
+            ).addOnFailureListener { error ->
+                runOnUiThread {
+                    statusText.text =
+                        "Connection request failed: ${error.message}"
                 }
+            }
         }
 
         override fun onEndpointLost(endpointId: String) {
-            // Endpoint is no longer visible.
+            // Device no longer visible.
         }
     }
 
@@ -158,17 +155,20 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER
         }
 
-        val connectButton = Button(this).apply {
+        root.addView(statusText)
+        root.addView(deviceCountText)
+
+        root.addView(Button(this).apply {
             text = "Find / Connect Suda Devices"
             setOnClickListener { checkBluetoothAndStart() }
-        }
+        })
 
-        val sendButton = Button(this).apply {
+        root.addView(Button(this).apply {
             text = "Send Test Message"
             setOnClickListener { sendTestMessage() }
-        }
+        })
 
-        val recordButton = Button(this).apply {
+        root.addView(Button(this).apply {
             text = "Start Voice Recording"
             setOnClickListener {
                 if (isRecording) {
@@ -179,19 +179,12 @@ class MainActivity : AppCompatActivity() {
                     if (isRecording) text = "Stop Voice Recording"
                 }
             }
-        }
+        })
 
-        val soundButton = Button(this).apply {
+        root.addView(Button(this).apply {
             text = "Test Message Sound"
             setOnClickListener { playMessageSound() }
-        }
-
-        root.addView(statusText)
-        root.addView(deviceCountText)
-        root.addView(connectButton)
-        root.addView(sendButton)
-        root.addView(recordButton)
-        root.addView(soundButton)
+        })
 
         setContentView(root)
     }
@@ -240,13 +233,15 @@ class MainActivity : AppCompatActivity() {
 
             if (adapter != null && !adapter.isEnabled) {
                 startActivityForResult(
-                    Intent(android.bluetooth.BluetoothAdapter.ACTION_REQUEST_ENABLE),
+                    Intent(
+                        android.bluetooth.BluetoothAdapter.ACTION_REQUEST_ENABLE
+                    ),
                     REQUEST_BLUETOOTH
                 )
                 return
             }
         } catch (_: Exception) {
-            // Continue and let Nearby report any transport issue.
+            // Nearby will report transport errors if any.
         }
 
         startNearby()
@@ -259,6 +254,7 @@ class MainActivity : AppCompatActivity() {
         data: Intent?
     ) {
         super.onActivityResult(requestCode, resultCode, data)
+
         if (requestCode == REQUEST_BLUETOOTH &&
             resultCode == RESULT_OK
         ) {
@@ -281,10 +277,13 @@ class MainActivity : AppCompatActivity() {
             lifecycleCallback,
             advertisingOptions
         ).addOnSuccessListener {
-            runOnUiThread { statusText.text = "Advertising: ready" }
+            runOnUiThread {
+                statusText.text = "Advertising: ready"
+            }
         }.addOnFailureListener { error ->
             runOnUiThread {
-                statusText.text = "Advertising failed: ${error.message}"
+                statusText.text =
+                    "Advertising failed: ${error.message}"
             }
         }
 
@@ -293,47 +292,58 @@ class MainActivity : AppCompatActivity() {
             discoveryCallback,
             discoveryOptions
         ).addOnSuccessListener {
-            runOnUiThread { statusText.text = "Searching for Suda devices..." }
+            runOnUiThread {
+                statusText.text = "Searching for Suda devices..."
+            }
         }.addOnFailureListener { error ->
             runOnUiThread {
-                statusText.text = "Discovery failed: ${error.message}"
+                statusText.text =
+                    "Discovery failed: ${error.message}"
             }
         }
     }
 
     private fun sendTestMessage() {
         if (connectedDevices.isEmpty()) {
-            Toast.makeText(this, "No Suda device connected", Toast.LENGTH_SHORT)
-                .show()
+            Toast.makeText(
+                this,
+                "No Suda device connected",
+                Toast.LENGTH_SHORT
+            ).show()
             return
         }
 
-        val payload = Payload.fromBytes(
-            "Hello from Suda!".toByteArray(Charsets.UTF_8)
-        )
-
         connectedDevices.toList().forEach { endpointId ->
-            client.sendPayload(endpointId, payload)
-                .addOnFailureListener { error ->
-                    runOnUiThread {
-                        Toast.makeText(
-                            this,
-                            "Send failed: ${error.message}",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
+            client.sendPayload(
+                endpointId,
+                Payload.fromBytes(
+                    "Hello from Suda!".toByteArray(Charsets.UTF_8)
+                )
+            ).addOnFailureListener { error ->
+                runOnUiThread {
+                    Toast.makeText(
+                        this,
+                        "Send failed: ${error.message}",
+                        Toast.LENGTH_SHORT
+                    ).show()
                 }
+            }
         }
     }
 
     private fun updateDeviceCount() {
-        deviceCountText.text = "Connected devices: ${connectedDevices.size}"
+        deviceCountText.text =
+            "Connected devices: ${connectedDevices.size}"
     }
 
     private fun playMessageSound() {
         try {
-            val audio = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            audio.playSoundEffect(AudioManager.FX_KEYPRESS_STANDARD, 0.8f)
+            val audio =
+                getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            audio.playSoundEffect(
+                AudioManager.FX_KEYPRESS_STANDARD,
+                0.8f
+            )
         } catch (_: Exception) {
             // Ignore sound errors.
         }
@@ -350,8 +360,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         try {
-            val directory = getExternalFilesDir(Environment.DIRECTORY_MUSIC)
-                ?: filesDir
+            val directory =
+                getExternalFilesDir(Environment.DIRECTORY_MUSIC)
+                    ?: filesDir
 
             if (!directory.exists()) directory.mkdirs()
 
@@ -377,11 +388,20 @@ class MainActivity : AppCompatActivity() {
             }
 
             isRecording = true
-            Toast.makeText(this, "Recording started", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                this,
+                "Recording started",
+                Toast.LENGTH_SHORT
+            ).show()
         } catch (error: Exception) {
-            recorder?.release()
+            try {
+                recorder?.release()
+            } catch (_: Exception) {
+            }
+
             recorder = null
             isRecording = false
+
             Toast.makeText(
                 this,
                 "Recording failed: ${error.message}",
@@ -394,7 +414,7 @@ class MainActivity : AppCompatActivity() {
         try {
             recorder?.stop()
         } catch (_: Exception) {
-            // Recording may be too short to finalize.
+            // Ignore very short recording errors.
         } finally {
             recorder?.release()
             recorder = null
@@ -414,13 +434,11 @@ class MainActivity : AppCompatActivity() {
             client.stopDiscovery()
             client.stopAllEndpoints()
         } catch (_: Exception) {
-            // Ignore cleanup failures.
         }
 
         try {
             recorder?.release()
         } catch (_: Exception) {
-            // Ignore cleanup failures.
         }
 
         recorder = null
